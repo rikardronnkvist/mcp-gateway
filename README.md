@@ -28,7 +28,8 @@ claude.ai ──OAuth──▶ Traefik ──▶ mcp-gateway ──(bearer, inte
 | `OIDC_CLIENT_ID` | yes | |
 | `OIDC_CLIENT_SECRET` | yes | |
 | `JWT_SIGNING_KEY` | yes | Random, unique per instance (`openssl rand -base64 48`). Signs the tokens the gateway issues and encrypts its client store. |
-| `OIDC_SCOPES` | no | Default `openid profile email` |
+| `OIDC_SCOPES` | no | Scopes offered to MCP clients. Default `openid profile email` |
+| `OIDC_UPSTREAM_EXTRA_SCOPES` | no | Extra scopes requested from the IdP only. Default `offline_access` (needed for refresh tokens). Set empty to disable. |
 | `OIDC_ALGORITHM` | no | Default `RS256` |
 | `ALLOW_TOOLS` | no | Comma-separated allowlist. **Preferred** – new backend tools stay hidden. |
 | `HIDE_TOOLS` | no | Comma-separated denylist. Mutually exclusive with `ALLOW_TOOLS`. |
@@ -46,7 +47,9 @@ so clients don't have to re-register after a restart. The container runs as uid 
 1. **Provider** → OAuth2/OpenID Provider, client type *Confidential*.
    - Redirect URI (strict): `https://<gateway-host>/auth/callback`
    - **Signing key: set one** (RS256). Without it access tokens are HS256 and JWKS verification fails.
-   - Scopes: `openid`, `profile`, `email`.
+   - Scopes: `openid`, `profile`, `email` **and `offline_access`**. Without `offline_access`
+     Authentik issues no refresh token, and clients must reconnect every time the
+     access token expires (5 minutes by default).
 2. **Application** bound to the provider. Use the slug in `OIDC_CONFIG_URL`:
    `https://<authentik>/application/o/<slug>/.well-known/openid-configuration`
 3. **Policy binding** on the application limiting it to your user/group. Consider requiring

@@ -232,3 +232,24 @@ async def test_upstream_token_audience_and_issuer(oidc_env, keypair, fake_idp):
     assert await verifier.verify_token(good) is not None
     assert await verifier.verify_token(other_app) is None
     assert await verifier.verify_token(wrong_iss) is None
+
+
+def _scope_param(url: str) -> list[str]:
+    from urllib.parse import parse_qs, urlparse
+    return parse_qs(urlparse(url).query)["scope"][0].split()
+
+
+def test_upstream_authorize_requests_offline_access(oidc_env):
+    auth = gateway.build_auth()
+    url = auth._build_upstream_authorize_url("txn", {"scopes": ["openid", "profile"]})
+    assert _scope_param(url) == ["openid", "profile", "offline_access"]
+    # not duplicated if the client already asked for it
+    url = auth._build_upstream_authorize_url("txn", {"scopes": ["openid", "offline_access"]})
+    assert _scope_param(url) == ["openid", "offline_access"]
+
+
+def test_upstream_extra_scopes_can_be_disabled(oidc_env, monkeypatch):
+    monkeypatch.setenv("OIDC_UPSTREAM_EXTRA_SCOPES", " ")
+    auth = gateway.build_auth()
+    url = auth._build_upstream_authorize_url("txn", {"scopes": ["openid"]})
+    assert _scope_param(url) == ["openid"]

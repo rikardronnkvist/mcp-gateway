@@ -27,6 +27,10 @@ from starlette.responses import JSONResponse
 log = logging.getLogger("mcp-gateway")
 
 DEFAULT_SCOPES = "openid profile email"
+# Requested from the IdP only. Without offline_access Authentik issues no
+# refresh token, so clients must re-authenticate when the (short-lived)
+# upstream access token expires.
+DEFAULT_UPSTREAM_EXTRA_SCOPES = "offline_access"
 
 
 class ConfigError(Exception):
@@ -72,7 +76,11 @@ def build_auth() -> AuthProvider:
         base_url=base_url,
     )
 
-    return OIDCProxy(
+    # Explicitly set (even empty) overrides the default; empty disables it.
+    extra = os.environ.get("OIDC_UPSTREAM_EXTRA_SCOPES", DEFAULT_UPSTREAM_EXTRA_SCOPES).split()
+
+    return GatewayOIDCProxy(
+        upstream_extra_scopes=extra,
         config_url=config_url,
         client_id=client_id,
         client_secret=env("OIDC_CLIENT_SECRET", required=True),
@@ -84,6 +92,25 @@ def build_auth() -> AuthProvider:
         # resource indicators upstream.
         forward_resource=False,
     )
+
+
+class GatewayOIDCProxy(OIDCProxy):
+    """OIDCProxy that always requests extra scopes (e.g. offline_access) upstream.
+
+    The extra scopes are added only to the IdP authorize request, not to the
+    scopes advertised to or granted to MCP clients.
+    """
+
+    def __init__(self, *, upstream_extra_scopes: list[str] | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self._upstream_extra_scopes = list(upstream_extra_scopes or [])
+
+    def _build_upstream_authorize_url(self, txn_id, transaction):
+        if self._upstream_extra_scopes:
+            scopes = list(transaction.get("scopes") or self.required_scopes or [])
+            scopes += [s for s in self._upstream_extra_scopes if s not in scopes]
+            transaction = {**transaction, "scopes": scopes}
+        return super()._build_upstream_authorize_url(txn_id, transaction)
 
 
 class AllowedSubjectsMiddleware(Middleware):
