@@ -66,7 +66,7 @@ def backend_url() -> str:
 
 @pytest.fixture
 def base_env(monkeypatch, backend_url):
-    for var in ("ALLOW_TOOLS", "HIDE_TOOLS", "ALLOWED_SUBJECTS"):
+    for var in ("ALLOW_TOOLS", "HIDE_TOOLS", "ALLOWED_SUBJECTS", "GATEWAY_ICON"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("BACKEND_URL", backend_url)
     monkeypatch.setenv("BACKEND_TOKEN", BACKEND_TOKEN)
@@ -148,6 +148,77 @@ async def test_subject_middleware_rejects_others(base_env, monkeypatch, caplog, 
         async with Client(gw) as client:
             await client.call_tool("get_status")
     assert "Rejected request" in caplog.text
+
+
+# --- Icon ------------------------------------------------------------------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+
+async def server_icons(server: FastMCP):
+    async with Client(server) as client:
+        return client.server_info.icons
+
+
+async def test_no_icon_by_default(base_env):
+    gw = gateway.build_gateway(auth=None)
+    assert not await server_icons(gw)
+    with TestClient(gw.http_app()) as http:
+        assert http.get("/favicon.ico").status_code == 404
+        assert http.get("/icon").status_code == 404
+
+
+async def test_icon_served_and_advertised(base_env, monkeypatch, tmp_path):
+    icon = tmp_path / "icon.png"
+    icon.write_bytes(PNG_BYTES)
+    monkeypatch.setenv("GATEWAY_ICON", str(icon))
+    monkeypatch.setenv("BASE_URL", "https://gw.example.com/")
+    gw = gateway.build_gateway(auth=None)
+
+    icons = await server_icons(gw)
+    assert [(i.src, i.mime_type) for i in icons] == [("https://gw.example.com/icon", "image/png")]
+
+    with TestClient(gw.http_app()) as http:
+        for path in ("/icon", "/favicon.ico"):
+            r = http.get(path)
+            assert r.status_code == 200
+            assert r.content == PNG_BYTES
+            assert r.headers["content-type"] == "image/png"
+            assert "sandbox" in r.headers["content-security-policy"]
+
+
+def test_icon_is_public_with_auth(oidc_env, monkeypatch, tmp_path):
+    icon = tmp_path / "icon.png"
+    icon.write_bytes(PNG_BYTES)
+    monkeypatch.setenv("GATEWAY_ICON", str(icon))
+    gw = gateway.build_gateway(gateway.build_auth())
+    with TestClient(gw.http_app()) as http:
+        assert http.get("/favicon.ico").status_code == 200
+
+
+@pytest.mark.parametrize("name, content", [
+    ("missing.png", None),
+    ("icon.gif", PNG_BYTES),
+    ("empty.png", b""),
+    ("huge.png", b"x" * (gateway.ICON_MAX_BYTES + 1)),
+])
+def test_bad_icon_is_config_error(base_env, monkeypatch, tmp_path, name, content):
+    path = tmp_path / name
+    if content is not None:
+        path.write_bytes(content)
+    monkeypatch.setenv("GATEWAY_ICON", str(path))
+    monkeypatch.setenv("BASE_URL", "https://gw.example.com")
+    with pytest.raises(gateway.ConfigError):
+        gateway.build_gateway(auth=None)
+
+
+def test_icon_requires_base_url(base_env, monkeypatch, tmp_path):
+    icon = tmp_path / "icon.png"
+    icon.write_bytes(PNG_BYTES)
+    monkeypatch.setenv("GATEWAY_ICON", str(icon))
+    monkeypatch.delenv("BASE_URL", raising=False)
+    with pytest.raises(gateway.ConfigError, match="BASE_URL"):
+        gateway.build_gateway(auth=None)
 
 
 # --- OIDC ------------------------------------------------------------------

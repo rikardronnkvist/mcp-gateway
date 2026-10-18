@@ -35,12 +35,35 @@ claude.ai ──OAuth──▶ Traefik ──▶ mcp-gateway ──(bearer, inte
 | `HIDE_TOOLS` | no | Comma-separated denylist. Mutually exclusive with `ALLOW_TOOLS`. |
 | `ALLOWED_SUBJECTS` | no | Comma-separated `sub` / `email` / `preferred_username` values. Defense in depth on top of IdP policy. |
 | `GATEWAY_NAME` | no | Server name shown to clients |
+| `GATEWAY_ICON` | no | Path to an icon file in the container (`.png`, `.svg`, `.jpg`, `.webp`, `.ico`, max 1 MB). Served at `/icon` and `/favicon.ico` and advertised in `serverInfo.icons`. Requires `BASE_URL`. Unset = no icon. |
 | `PORT` / `HOST` / `LOG_LEVEL` | no | Defaults `8000` / `0.0.0.0` / `INFO` |
 
 `/data` holds the encrypted OAuth client registrations. Mount it on persistent storage
 so clients don't have to re-register after a restart. The container runs as uid `10001`.
 
 `GET /health` is an unauthenticated liveness probe; it does not contact the backend.
+
+### Icon
+
+Clients such as claude.ai show a generic avatar unless the server provides an icon.
+Mount one per instance, e.g. as a Swarm config:
+
+```yaml
+configs:
+  my-mcp-icon:
+    file: ./icons/my-mcp.png
+
+services:
+  my-mcp-gw:
+    environment:
+      GATEWAY_ICON: /icons/icon.png
+    configs:
+      - source: my-mcp-icon
+        target: /icons/icon.png
+```
+
+`/icon` and `/favicon.ico` are unauthenticated and served with a sandboxing CSP.
+Clients cache icons; in claude.ai, remove and re-add the connector to pick up a new one.
 
 ## Authentik setup
 
