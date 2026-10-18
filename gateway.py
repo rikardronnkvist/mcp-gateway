@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from pathlib import Path
 
 from fastmcp import FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
@@ -20,9 +21,10 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.providers.proxy import ProxyClient
+from mcp.types import Icon
 from pydantic import AnyHttpUrl
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 log = logging.getLogger("mcp-gateway")
 
@@ -31,6 +33,16 @@ DEFAULT_SCOPES = "openid profile email"
 # refresh token, so clients must re-authenticate when the (short-lived)
 # upstream access token expires.
 DEFAULT_UPSTREAM_EXTRA_SCOPES = "offline_access"
+
+ICON_MAX_BYTES = 1024 * 1024
+ICON_TYPES = {
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+}
 
 
 class ConfigError(Exception):
@@ -47,6 +59,29 @@ def env(name: str, default: str | None = None, *, required: bool = False) -> str
 def env_list(name: str) -> list[str]:
     raw = env(name) or ""
     return [item.strip() for item in raw.replace(" ", ",").split(",") if item.strip()]
+
+
+def load_icon() -> tuple[bytes, str] | None:
+    """Optional server icon from GATEWAY_ICON (a file path inside the container).
+
+    Returns (data, mime_type), or None when no icon is configured.
+    """
+    path = env("GATEWAY_ICON")
+    if not path:
+        return None
+    p = Path(path)
+    mime = ICON_TYPES.get(p.suffix.lower())
+    if mime is None:
+        raise ConfigError(
+            f"GATEWAY_ICON must be one of {', '.join(sorted(ICON_TYPES))}: {path}"
+        )
+    try:
+        data = p.read_bytes()
+    except OSError as exc:
+        raise ConfigError(f"Cannot read GATEWAY_ICON {path}: {exc}") from exc
+    if not data or len(data) > ICON_MAX_BYTES:
+        raise ConfigError(f"GATEWAY_ICON must be 1 byte to {ICON_MAX_BYTES} bytes: {path}")
+    return data, mime
 
 
 def build_auth() -> AuthProvider:
@@ -150,7 +185,15 @@ def build_gateway(auth: AuthProvider | None) -> FastMCP:
         forward_incoming_headers=False,
     )
 
-    gateway = FastMCP(env("GATEWAY_NAME", "MCP Gateway"), auth=auth)
+    icon = load_icon()
+    icons = None
+    if icon:
+        base_url = env("BASE_URL")
+        if not base_url:
+            raise ConfigError("BASE_URL is required when GATEWAY_ICON is set")
+        icons = [Icon(src=f"{base_url.rstrip('/')}/icon", mime_type=icon[1])]
+
+    gateway = FastMCP(env("GATEWAY_NAME", "MCP Gateway"), auth=auth, icons=icons)
     gateway.mount(create_proxy(backend))
 
     allow_tools = set(env_list("ALLOW_TOOLS"))
@@ -176,6 +219,26 @@ def build_gateway(auth: AuthProvider | None) -> FastMCP:
     async def health(_: Request) -> JSONResponse:
         # Liveness only; does not contact the backend.
         return JSONResponse({"status": "ok"})
+
+    if icon:
+        icon_data, icon_mime = icon
+
+        # Unauthenticated, like /health: clients fetch it before OAuth.
+        async def serve_icon(_: Request) -> Response:
+            return Response(
+                icon_data,
+                media_type=icon_mime,
+                headers={
+                    "Cache-Control": "public, max-age=86400",
+                    "X-Content-Type-Options": "nosniff",
+                    # SVG can carry script; never let it run on the OAuth origin.
+                    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                },
+            )
+
+        for route in ("/icon", "/favicon.ico"):
+            gateway.custom_route(route, methods=["GET"], include_in_schema=False)(serve_icon)
+        log.info("Serving icon (%s, %d bytes)", icon_mime, len(icon_data))
 
     return gateway
 
